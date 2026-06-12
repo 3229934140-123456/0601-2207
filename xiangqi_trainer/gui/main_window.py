@@ -1,0 +1,792 @@
+import sys
+import time
+from typing import Optional
+
+from PyQt5.QtWidgets import (
+    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter,
+    QAction, QActionGroup, QToolBar, QLabel, QPushButton, QFrame,
+    QMessageBox, QFileDialog, QInputDialog, QMenu, QTabWidget
+)
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QFont, QIcon
+
+from .board_widget import BoardWidget
+from .puzzle_library import PuzzleLibrary
+from .hint_panel import HintPanel
+from .review_panel import ReviewPanel
+from .stats_panel import StatsPanel
+
+from ..core.game import GameController
+from ..core.ai import AIOpponent
+from ..core.board import Board
+from ..core.pieces import PieceColor
+from ..core.rules import is_check
+from ..core.utils import board_to_grid, board_from_grid, parse_move_str
+
+from ..data.puzzles import get_all_puzzles, get_puzzle_by_id, Puzzle
+from ..data.storage import (
+    load_stats, save_stats, get_custom_puzzles, add_custom_puzzle,
+    Statistics
+)
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("象棋残局训练")
+        self.resize(1200, 800)
+
+        self.game = GameController()
+        self.ai = AIOpponent("中等")
+        self.stats: Statistics = load_stats()
+        self.night_mode = False
+        self.large_pieces = False
+        self.ai_thinking = False
+        self.review_mode = False
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self._update_timer)
+        self.elapsed_seconds = 0
+
+        self._init_ui()
+        self._init_menu()
+        self._init_toolbar()
+        self._connect_signals()
+        self._load_default_puzzle()
+        self._update_stats_display()
+
+    def _init_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(6)
+
+        left_splitter = QSplitter(Qt.Vertical)
+
+        self.puzzle_library = PuzzleLibrary()
+        self.puzzle_library.setMinimumWidth(280)
+
+        self.stats_panel = StatsPanel()
+
+        left_tab = QTabWidget()
+        left_tab.addTab(self.puzzle_library, "题库")
+        left_tab.addTab(self.stats_panel, "成绩")
+
+        left_splitter.addWidget(left_tab)
+
+        center_layout = QVBoxLayout()
+        center_layout.setSpacing(8)
+
+        info_frame = QFrame()
+        info_frame.setFrameShape(QFrame.StyledPanel)
+        info_layout = QHBoxLayout(info_frame)
+        info_layout.setContentsMargins(12, 8, 12, 8)
+        info_layout.setSpacing(15)
+
+        self.puzzle_name_label = QLabel("未选择残局")
+        puzzle_name_font = QFont()
+        puzzle_name_font.setPointSize(13)
+        puzzle_name_font.setBold(True)
+        self.puzzle_name_label.setFont(puzzle_name_font)
+        info_layout.addWidget(self.puzzle_name_label)
+
+        info_layout.addStretch()
+
+        self.turn_label = QLabel("红方走")
+        self.turn_label.setStyleSheet(
+            "color: #C41E3A; font-weight: bold; font-size: 14px;"
+        )
+        info_layout.addWidget(self.turn_label)
+
+        self.check_label = QLabel("")
+        self.check_label.setStyleSheet(
+            "color: #e74c3c; font-weight: bold; font-size: 14px;"
+        )
+        info_layout.addWidget(self.check_label)
+
+        self.time_label = QLabel("00:00")
+        time_font = QFont()
+        time_font.setPointSize(14)
+        time_font.setBold(True)
+        self.time_label.setFont(time_font)
+        self.time_label.setStyleSheet("color: #2c3e50;")
+        info_layout.addWidget(self.time_label)
+
+        center_layout.addWidget(info_frame)
+
+        self.board_widget = BoardWidget()
+        self.board_widget.setMinimumSize(500, 550)
+        center_layout.addWidget(self.board_widget, 1)
+
+        control_frame = QFrame()
+        control_frame.setFrameShape(QFrame.StyledPanel)
+        control_layout = QHBoxLayout(control_frame)
+        control_layout.setContentsMargins(12, 8, 12, 8)
+        control_layout.setSpacing(8)
+
+        self.undo_btn = QPushButton("撤回")
+        self.restart_btn = QPushButton("重来")
+        self.hint_btn = QPushButton("提示")
+        self.review_btn = QPushButton("复盘")
+        self.next_puzzle_btn = QPushButton("下一题")
+
+        for btn in [self.undo_btn, self.restart_btn, self.hint_btn,
+                    self.review_btn, self.next_puzzle_btn]:
+            btn.setMinimumHeight(36)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #3498db;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 6px 16px;
+                    font-size: 13px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #2980b9;
+                }
+                QPushButton:pressed {
+                    background-color: #1f618d;
+                }
+                QPushButton:disabled {
+                    background-color: #bdc3c7;
+                    color: #7f8c8d;
+                }
+            """)
+
+        self.undo_btn.clicked.connect(self._on_undo)
+        self.restart_btn.clicked.connect(self._on_restart)
+        self.hint_btn.clicked.connect(self._on_hint)
+        self.review_btn.clicked.connect(self._on_review)
+        self.next_puzzle_btn.clicked.connect(self._on_next_puzzle)
+
+        control_layout.addWidget(self.undo_btn)
+        control_layout.addWidget(self.restart_btn)
+        control_layout.addWidget(self.hint_btn)
+        control_layout.addStretch()
+        control_layout.addWidget(self.review_btn)
+        control_layout.addWidget(self.next_puzzle_btn)
+
+        center_layout.addWidget(control_frame)
+
+        center_widget = QWidget()
+        center_widget.setLayout(center_layout)
+
+        right_tab = QTabWidget()
+        right_tab.setMinimumWidth(300)
+
+        self.hint_panel = HintPanel()
+        right_tab.addTab(self.hint_panel, "提示")
+
+        self.review_panel = ReviewPanel()
+        right_tab.addTab(self.review_panel, "复盘")
+
+        main_splitter = QSplitter(Qt.Horizontal)
+        main_splitter.addWidget(left_tab)
+        main_splitter.addWidget(center_widget)
+        main_splitter.addWidget(right_tab)
+        main_splitter.setStretchFactor(0, 1)
+        main_splitter.setStretchFactor(1, 3)
+        main_splitter.setStretchFactor(2, 1)
+
+        main_layout.addWidget(main_splitter)
+
+    def _init_menu(self):
+        menubar = self.menuBar()
+
+        file_menu = menubar.addMenu("文件")
+
+        save_puzzle_action = QAction("保存当前残局为自定义...", self)
+        save_puzzle_action.triggered.connect(self._on_save_custom_puzzle)
+        file_menu.addAction(save_puzzle_action)
+
+        import_pgn_action = QAction("导入棋谱文本...", self)
+        import_pgn_action.triggered.connect(self._on_import_pgn)
+        file_menu.addAction(import_pgn_action)
+
+        file_menu.addSeparator()
+
+        exit_action = QAction("退出", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        game_menu = menubar.addMenu("游戏")
+
+        undo_action = QAction("撤回一步", self)
+        undo_action.setShortcut("Ctrl+Z")
+        undo_action.triggered.connect(self._on_undo)
+        game_menu.addAction(undo_action)
+
+        restart_action = QAction("重新开始", self)
+        restart_action.setShortcut("Ctrl+R")
+        restart_action.triggered.connect(self._on_restart)
+        game_menu.addAction(restart_action)
+
+        game_menu.addSeparator()
+
+        hint_action = QAction("获取提示", self)
+        hint_action.setShortcut("H")
+        hint_action.triggered.connect(self._on_hint)
+        game_menu.addAction(hint_action)
+
+        view_menu = menubar.addMenu("视图")
+
+        night_mode_action = QAction("夜间模式", self)
+        night_mode_action.setCheckable(True)
+        night_mode_action.toggled.connect(self._toggle_night_mode)
+        view_menu.addAction(night_mode_action)
+
+        large_pieces_action = QAction("大棋子模式", self)
+        large_pieces_action.setCheckable(True)
+        large_pieces_action.toggled.connect(self._toggle_large_pieces)
+        view_menu.addAction(large_pieces_action)
+
+        help_menu = menubar.addMenu("帮助")
+
+        about_action = QAction("关于", self)
+        about_action.triggered.connect(self._on_about)
+        help_menu.addAction(about_action)
+
+    def _init_toolbar(self):
+        toolbar = QToolBar("工具栏")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+
+        undo_action = QAction("撤回", self)
+        undo_action.triggered.connect(self._on_undo)
+        toolbar.addAction(undo_action)
+
+        restart_action = QAction("重来", self)
+        restart_action.triggered.connect(self._on_restart)
+        toolbar.addAction(restart_action)
+
+        toolbar.addSeparator()
+
+        hint_action = QAction("提示", self)
+        hint_action.triggered.connect(self._on_hint)
+        toolbar.addAction(hint_action)
+
+        toolbar.addSeparator()
+
+        night_action = QAction("夜间模式", self)
+        night_action.setCheckable(True)
+        night_action.toggled.connect(self._toggle_night_mode)
+        toolbar.addAction(night_action)
+
+        large_action = QAction("大棋子", self)
+        large_action.setCheckable(True)
+        large_action.toggled.connect(self._toggle_large_pieces)
+        toolbar.addAction(large_action)
+
+    def _connect_signals(self):
+        self.board_widget.piece_selected.connect(self._on_piece_selected)
+        self.board_widget.move_made.connect(self._on_move_made)
+        self.puzzle_library.puzzle_selected.connect(self._on_puzzle_selected)
+        self.hint_panel.hint_requested.connect(self._on_hint_requested)
+        self.review_panel.step_changed.connect(self._on_review_step_changed)
+        self.review_panel.review_closed.connect(self._on_review_closed)
+
+    def _load_default_puzzle(self):
+        all_puzzles = get_all_puzzles()
+        custom_puzzles = get_custom_puzzles()
+        self.puzzle_library.load_puzzles(all_puzzles + custom_puzzles)
+
+        if all_puzzles:
+            self._load_puzzle(all_puzzles[0].id)
+
+    def _load_puzzle(self, puzzle_id: str):
+        puzzle = get_puzzle_by_id(puzzle_id)
+        if puzzle is None:
+            custom_puzzles = get_custom_puzzles()
+            for p in custom_puzzles:
+                if p.id == puzzle_id:
+                    puzzle = p
+                    break
+
+        if puzzle is None:
+            return
+
+        self.game.load_puzzle(puzzle)
+        self.board_widget.set_board(self.game.board)
+        self.board_widget.clear_selection()
+        self.puzzle_name_label.setText(puzzle.name)
+
+        self.hint_panel.reset()
+        self.hint_panel.set_score(self.game.score)
+
+        self.elapsed_seconds = 0
+        self.timer.start(1000)
+        self._update_turn_label()
+        self._update_check_status()
+        self._update_buttons()
+
+        self.review_mode = False
+
+        self._update_review_panel()
+
+    def _on_puzzle_selected(self, puzzle_id: str):
+        self._load_puzzle(puzzle_id)
+
+    def _on_piece_selected(self, x: int, y: int):
+        if self.review_mode or self.ai_thinking:
+            return
+
+        valid_moves = self.game.get_valid_moves(x, y)
+        move_positions = [(m.to_x, m.to_y) for m in valid_moves]
+        self.board_widget.highlight_moves(move_positions)
+
+    def _on_move_made(self, from_x: int, from_y: int, to_x: int, to_y: int):
+        if self.review_mode or self.ai_thinking:
+            return
+
+        player_color = PieceColor.BLACK if self.game.current_puzzle.black_to_move else PieceColor.RED
+
+        if self.game.current_turn != player_color:
+            return
+
+        success, msg = self.game.make_move(from_x, from_y, to_x, to_y)
+        if not success:
+            QMessageBox.warning(self, "提示", msg)
+            return
+
+        self.board_widget.set_board(self.game.board)
+        self.board_widget.highlight_last_move(from_x, from_y, to_x, to_y)
+        self.board_widget.clear_selection()
+
+        self._update_turn_label()
+        self._update_check_status()
+        self._update_buttons()
+        self._update_review_panel()
+
+        if self.game.is_game_over:
+            self._on_game_over()
+            return
+
+        if self.game.current_turn != player_color:
+            QTimer.singleShot(500, self._ai_move)
+
+    def _ai_move(self):
+        if self.game.is_game_over or self.review_mode:
+            return
+
+        self.ai_thinking = True
+        self.turn_label.setText("电脑思考中...")
+
+        ai_color = self.game.current_turn
+        move = self.ai.get_best_move(self.game.board, ai_color)
+
+        if move is None:
+            self.ai_thinking = False
+            self._update_turn_label()
+            return
+
+        success, _ = self.game.make_move(move.from_x, move.from_y, move.to_x, move.to_y)
+
+        if success:
+            self.board_widget.set_board(self.game.board)
+            self.board_widget.highlight_last_move(
+                move.from_x, move.from_y, move.to_x, move.to_y
+            )
+            self._update_turn_label()
+            self._update_check_status()
+            self._update_buttons()
+            self._update_review_panel()
+
+            if self.game.is_game_over:
+                self._on_game_over()
+
+        self.ai_thinking = False
+        self._update_turn_label()
+
+    def _on_undo(self):
+        if self.review_mode:
+            return
+
+        player_color = PieceColor.BLACK if self.game.current_puzzle.black_to_move else PieceColor.RED
+
+        if self.game.current_turn == player_color:
+            if self.game.undo_move():
+                self.game.undo_move()
+
+                self.board_widget.set_board(self.game.board)
+                self.board_widget.clear_selection()
+                self._update_turn_label()
+                self._update_check_status()
+                self._update_buttons()
+                self._update_review_panel()
+
+                if self.game.is_game_over:
+                    self.timer.stop()
+
+                self.hint_panel.reset()
+                self.hint_panel.set_score(self.game.score)
+                self.hint_panel.set_hints_used(self.game.hints_used)
+        else:
+            self.game.undo_move()
+            self.game.undo_move()
+            self.board_widget.set_board(self.game.board)
+            self.board_widget.clear_selection()
+            self._update_turn_label()
+            self._update_check_status()
+            self._update_buttons()
+            self._update_review_panel()
+
+    def _on_restart(self):
+        if self.game.current_puzzle:
+            self.game.restart_puzzle()
+            self.board_widget.set_board(self.game.board)
+            self.board_widget.clear_selection()
+            self.hint_panel.reset()
+            self.hint_panel.set_score(self.game.score)
+
+            self.elapsed_seconds = 0
+            self.timer.start(1000)
+            self._update_turn_label()
+            self._update_check_status()
+            self._update_buttons()
+            self._update_review_panel()
+
+            self.review_mode = False
+
+    def _on_hint(self):
+        if self.game.is_game_over or self.review_mode:
+            return
+
+        player_color = PieceColor.BLACK if self.game.current_puzzle.black_to_move else PieceColor.RED
+        if self.game.current_turn != player_color:
+            QMessageBox.information(self, "提示", "请等待电脑走棋后再获取提示")
+            return
+
+        next_level = self.hint_panel._current_level + 1
+        self._on_hint_requested(next_level)
+
+    def _on_hint_requested(self, level: int):
+        hint_text = self.game.get_solution_hint(level)
+        if hint_text:
+            self.hint_panel.use_hint(level, hint_text)
+
+    def _on_review(self):
+        if not self.game.move_history:
+            QMessageBox.information(self, "提示", "还没有走棋记录，无法复盘")
+            return
+
+        self.review_mode = True
+        self.timer.stop()
+        self._enter_review_mode(len(self.game.move_history) - 1)
+
+    def _enter_review_mode(self, step_index: int):
+        self.review_mode = True
+
+        move_list = []
+        for record in self.game.move_history:
+            move_list.append((
+                record.move.to_chinese(),
+                record.is_correct,
+                record.deviation_type
+            ))
+
+        player_color = PieceColor.BLACK if self.game.current_puzzle.black_to_move else PieceColor.RED
+        player_moves = [m for m in self.game.move_history if m.move.color == player_color]
+        correct_count = sum(1 for m in player_moves if m.is_correct)
+        total_time = sum(m.time_taken for m in player_moves)
+        avg_time = total_time / len(player_moves) if player_moves else 0
+
+        error_types = {}
+        for m in player_moves:
+            if not m.is_correct and m.deviation_type:
+                error_types[m.deviation_type] = error_types.get(m.deviation_type, 0) + 1
+
+        analysis = {
+            'total_steps': len(player_moves),
+            'correct_count': correct_count,
+            'avg_time': avg_time,
+            'error_types': error_types
+        }
+
+        self.review_panel.load_review(move_list, analysis)
+        self.review_panel.set_solution(self.game.get_solution_moves())
+        self.review_panel.set_current_step(step_index)
+
+        self._show_board_at_step(step_index)
+
+        self._update_buttons()
+
+    def _show_board_at_step(self, step_index: int):
+        if self.game.current_puzzle is None:
+            return
+
+        self.game.load_puzzle(self.game.current_puzzle)
+
+        for i in range(step_index + 1):
+            if i < len(self.game.move_history):
+                record = self.game.move_history[i]
+                self.game.make_move(
+                    record.move.from_x, record.move.from_y,
+                    record.move.to_x, record.move.to_y
+                )
+
+        self.board_widget.set_board(self.game.board)
+        if step_index >= 0 and step_index < len(self.game.move_history):
+            record = self.game.move_history[step_index]
+            self.board_widget.highlight_last_move(
+                record.move.from_x, record.move.from_y,
+                record.move.to_x, record.move.to_y
+            )
+        self.board_widget.clear_selection()
+        self._update_turn_label()
+        self._update_check_status()
+
+    def _on_review_step_changed(self, step_index: int):
+        self._show_board_at_step(step_index)
+
+    def _on_review_closed(self):
+        self.review_mode = False
+        self._load_puzzle(self.game.current_puzzle.id)
+        self._update_buttons()
+
+    def _on_next_puzzle(self):
+        all_puzzles = get_all_puzzles() + get_custom_puzzles()
+        if not all_puzzles:
+            return
+
+        current_id = self.game.current_puzzle.id if self.game.current_puzzle else ""
+        found = False
+        for i, puzzle in enumerate(all_puzzles):
+            if puzzle.id == current_id:
+                if i < len(all_puzzles) - 1:
+                    self._load_puzzle(all_puzzles[i + 1].id)
+                    found = True
+                break
+
+        if not found and all_puzzles:
+            self._load_puzzle(all_puzzles[0].id)
+
+    def _on_game_over(self):
+        self.timer.stop()
+
+        self.game.save_result(self.stats)
+        save_stats(self.stats)
+        self._update_stats_display()
+
+        result = self.game.game_result
+        total_time = self.game.get_total_time()
+        minutes = int(total_time // 60)
+        seconds = int(total_time % 60)
+        time_str = f"{minutes}分{seconds}秒"
+
+        msg = f"{result}\n\n用时：{time_str}\n得分：{self.game.score}\n使用提示：{self.game.hints_used}次"
+
+        if "胜利" in result:
+            QMessageBox.information(self, "恭喜", msg)
+        else:
+            QMessageBox.information(self, "游戏结束", msg)
+
+        self._update_buttons()
+
+    def _update_timer(self):
+        self.elapsed_seconds += 1
+        minutes = self.elapsed_seconds // 60
+        seconds = self.elapsed_seconds % 60
+        self.time_label.setText(f"{minutes:02d}:{seconds:02d}")
+
+    def _update_turn_label(self):
+        if self.game.current_turn == PieceColor.RED:
+            self.turn_label.setText("红方走")
+            self.turn_label.setStyleSheet(
+                "color: #C41E3A; font-weight: bold; font-size: 14px;"
+            )
+        else:
+            self.turn_label.setText("黑方走")
+            self.turn_label.setStyleSheet(
+                "color: #333333; font-weight: bold; font-size: 14px;"
+            )
+
+    def _update_check_status(self):
+        if is_check(self.game.board, self.game.current_turn):
+            self.check_label.setText("将军！")
+        else:
+            self.check_label.setText("")
+
+    def _update_buttons(self):
+        has_history = len(self.game.move_history) > 0
+        self.undo_btn.setEnabled(has_history and not self.review_mode)
+        self.restart_btn.setEnabled(self.game.current_puzzle is not None)
+        self.hint_btn.setEnabled(
+            not self.game.is_game_over and not self.review_mode
+            and self.game.current_puzzle is not None
+        )
+        self.review_btn.setEnabled(has_history)
+
+    def _update_review_panel(self):
+        if self.game.current_puzzle is None:
+            return
+
+        move_list = []
+        for record in self.game.move_history:
+            move_list.append((
+                record.move.to_chinese(),
+                record.is_correct,
+                record.deviation_type
+            ))
+
+        player_color = PieceColor.BLACK if self.game.current_puzzle.black_to_move else PieceColor.RED
+        player_moves = [m for m in self.game.move_history if m.move.color == player_color]
+        correct_count = sum(1 for m in player_moves if m.is_correct)
+        total_time = sum(m.time_taken for m in player_moves)
+        avg_time = total_time / len(player_moves) if player_moves else 0
+
+        error_types = {}
+        for m in player_moves:
+            if not m.is_correct and m.deviation_type:
+                error_types[m.deviation_type] = error_types.get(m.deviation_type, 0) + 1
+
+        analysis = {
+            'total_steps': len(player_moves),
+            'correct_count': correct_count,
+            'avg_time': avg_time,
+            'error_types': error_types
+        }
+
+        self.review_panel.load_review(move_list, analysis)
+        self.review_panel.set_solution(self.game.get_solution_moves())
+
+    def _update_stats_display(self):
+        self.stats_panel.update_stats(self.stats)
+
+    def _toggle_night_mode(self, enabled: bool):
+        self.night_mode = enabled
+        self.board_widget.set_night_mode(enabled)
+
+        if enabled:
+            self.setStyleSheet("""
+                QMainWindow, QWidget {
+                    background-color: #2b2b2b;
+                    color: #e0e0e0;
+                }
+                QFrame[frameShape="1"] {
+                    background-color: #3a3a3a;
+                    border: 1px solid #555555;
+                }
+                QTabWidget::pane {
+                    border: 1px solid #555555;
+                }
+                QTabBar::tab {
+                    background-color: #3a3a3a;
+                    color: #e0e0e0;
+                    padding: 8px 16px;
+                }
+                QTabBar::tab:selected {
+                    background-color: #2b2b2b;
+                }
+                QListWidget {
+                    background-color: #3a3a3a;
+                    color: #e0e0e0;
+                    border: 1px solid #555555;
+                }
+                QComboBox {
+                    background-color: #3a3a3a;
+                    color: #e0e0e0;
+                    border: 1px solid #555555;
+                    padding: 4px;
+                }
+                QLabel {
+                    color: #e0e0e0;
+                }
+                QToolBar {
+                    background-color: #3a3a3a;
+                    border: none;
+                }
+                QMenuBar {
+                    background-color: #3a3a3a;
+                    color: #e0e0e0;
+                }
+                QMenuBar::item:selected {
+                    background-color: #555555;
+                }
+                QMenu {
+                    background-color: #3a3a3a;
+                    color: #e0e0e0;
+                }
+                QMenu::item:selected {
+                    background-color: #555555;
+                }
+            """)
+        else:
+            self.setStyleSheet("")
+
+    def _toggle_large_pieces(self, enabled: bool):
+        self.large_pieces = enabled
+        self.board_widget.set_large_pieces(enabled)
+
+    def _on_save_custom_puzzle(self):
+        if self.game.current_puzzle is None:
+            QMessageBox.warning(self, "提示", "请先选择一个残局")
+            return
+
+        name, ok = QInputDialog.getText(self, "保存残局", "请输入残局名称：")
+        if not ok or not name:
+            return
+
+        grid = board_to_grid(self.game.board)
+        custom_id = f"custom_{int(time.time())}"
+
+        puzzle = Puzzle(
+            id=custom_id,
+            name=name,
+            description="自定义残局",
+            difficulty="中等",
+            kill_type="自定义",
+            steps=1,
+            initial_board=grid,
+            solution=[],
+            black_to_move=(self.game.current_turn == PieceColor.BLACK)
+        )
+
+        add_custom_puzzle(puzzle)
+        all_puzzles = get_all_puzzles() + get_custom_puzzles()
+        self.puzzle_library.load_puzzles(all_puzzles)
+
+        QMessageBox.information(self, "成功", "残局已保存到自定义题库")
+
+    def _on_import_pgn(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "导入棋谱文本", "", "文本文件 (*.txt);;所有文件 (*.*)"
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            QMessageBox.information(
+                self, "提示",
+                "棋谱文本导入功能开发中，暂支持简单的棋盘布局导入。\n\n"
+                "请使用棋盘编辑功能创建自定义残局。"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"导入失败：{str(e)}")
+
+    def _on_about(self):
+        QMessageBox.about(
+            self, "关于",
+            "象棋残局训练 v1.0\n\n"
+            "一款供象棋爱好者离线练习和复盘的残局训练软件\n\n"
+            "功能：\n"
+            "• 题库筛选（按杀法、难度、步数）\n"
+            "• 拖拽走子，自动判断合法性\n"
+            "• 将军、胜负提示\n"
+            "• 逐步提示，扣除成绩\n"
+            "• 撤回、重来功能\n"
+            "• 标准解法变着展示\n"
+            "• 自定义残局保存\n"
+            "• 复盘分析每步得失\n"
+            "• 学习成绩统计\n"
+            "• 夜间模式、大棋子模式"
+        )
+
+    def closeEvent(self, event):
+        save_stats(self.stats)
+        event.accept()
