@@ -375,23 +375,35 @@ class ReviewPanel(QWidget):
         total_steps = len(move_list)
         self.jump_spin.setRange(1, max(1, total_steps))
         self.jump_spin.setValue(1)
+        self.jump_spin.setSpecialValueText("开局")
 
         self.timeline_slider.blockSignals(True)
-        self.timeline_slider.setRange(0, max(0, total_steps - 1))
+        self.timeline_slider.setRange(-1, max(0, total_steps - 1))
+        self.timeline_slider.setValue(-1)
         self.timeline_slider.blockSignals(False)
 
     def set_current_step(self, index: int):
-        if 0 <= index < len(self._move_list):
+        if index >= -1 and index < len(self._move_list):
             self._current_step = index
             self._highlight_current_step()
             self._update_nav_buttons()
             self._update_step_info()
-            self.jump_spin.blockSignals(True)
-            self.jump_spin.setValue(index + 1)
-            self.jump_spin.blockSignals(False)
+
+            if index >= 0:
+                self.jump_spin.blockSignals(True)
+                self.jump_spin.setRange(1, max(1, len(self._move_list)))
+                self.jump_spin.setValue(index + 1)
+                self.jump_spin.blockSignals(False)
+            else:
+                self.jump_spin.blockSignals(True)
+                self.jump_spin.setRange(0, max(1, len(self._move_list)))
+                self.jump_spin.setValue(0)
+                self.jump_spin.blockSignals(False)
+
             self.timeline_slider.blockSignals(True)
             self.timeline_slider.setValue(index)
             self.timeline_slider.blockSignals(False)
+
             self._refresh_solution()
             self.step_changed.emit(index)
 
@@ -632,7 +644,7 @@ class ReviewPanel(QWidget):
             self.set_current_step(index)
 
     def _on_prev_clicked(self):
-        if self._current_step > 0:
+        if self._current_step >= 0:
             self.set_current_step(self._current_step - 1)
 
     def _on_next_clicked(self):
@@ -644,7 +656,7 @@ class ReviewPanel(QWidget):
 
     def _on_start_clicked(self):
         if self._move_list:
-            self.set_current_step(0)
+            self.set_current_step(-1)
 
     def _on_end_clicked(self):
         if self._move_list:
@@ -657,9 +669,9 @@ class ReviewPanel(QWidget):
         self.review_closed.emit()
 
     def _update_nav_buttons(self):
-        self.prev_button.setEnabled(self._current_step > 0)
+        self.prev_button.setEnabled(self._current_step >= 0)
         self.next_button.setEnabled(self._current_step < len(self._move_list) - 1)
-        self.start_button.setEnabled(self._current_step > 0)
+        self.start_button.setEnabled(self._current_step >= 0)
         self.end_button.setEnabled(self._current_step < len(self._move_list) - 1)
 
     def _update_step_info(self):

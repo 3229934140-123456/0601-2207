@@ -11,7 +11,7 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QIcon
 
 from .board_widget import BoardWidget
-from .puzzle_library import PuzzleLibrary
+from .puzzle_library import PuzzleLibrary, GameRecordLibrary
 from .hint_panel import HintPanel
 from .review_panel import ReviewPanel
 from .stats_panel import StatsPanel
@@ -28,7 +28,7 @@ from ..core.utils import (
 from ..data.puzzles import get_all_puzzles, get_puzzle_by_id, Puzzle
 from ..data.storage import (
     load_stats, save_stats, get_custom_puzzles, add_custom_puzzle,
-    Statistics
+    Statistics, get_game_records, GameRecord
 )
 
 
@@ -83,8 +83,12 @@ class MainWindow(QMainWindow):
 
         self.stats_panel = StatsPanel()
 
+        self.game_record_library = GameRecordLibrary()
+        self.game_record_library.setMinimumWidth(280)
+
         left_tab = QTabWidget()
         left_tab.addTab(self.puzzle_library, "题库")
+        left_tab.addTab(self.game_record_library, "对局记录")
         left_tab.addTab(self.stats_panel, "成绩")
 
         left_splitter.addWidget(left_tab)
@@ -306,6 +310,7 @@ class MainWindow(QMainWindow):
         self.board_widget.piece_selected.connect(self._on_piece_selected)
         self.board_widget.move_made.connect(self._on_move_made)
         self.puzzle_library.puzzle_selected.connect(self._on_puzzle_selected)
+        self.game_record_library.record_selected.connect(self._on_game_record_selected)
         self.hint_panel.hint_requested.connect(self._on_hint_requested)
         self.review_panel.step_changed.connect(self._on_review_step_changed)
         self.review_panel.review_closed.connect(self._on_review_closed)
@@ -315,9 +320,65 @@ class MainWindow(QMainWindow):
         all_puzzles = get_all_puzzles()
         custom_puzzles = get_custom_puzzles()
         self.puzzle_library.load_puzzles(all_puzzles + custom_puzzles)
+        self.game_record_library.load_records()
 
         if all_puzzles:
             self._load_puzzle(all_puzzles[0].id)
+
+    def _on_game_record_selected(self, record_id: str):
+        self._load_game_record(record_id)
+
+    def _load_game_record(self, record_id: str):
+        from ..data.storage import get_game_records
+        from ..core.game import MoveRecord
+
+        all_recs = get_game_records()
+        record = None
+        for r in all_recs:
+            if r.id == record_id:
+                record = r
+                break
+        if record is None:
+            return
+
+        temp_puzzle = Puzzle(
+            id=record.id,
+            name=record.name,
+            initial_board=record.initial_board,
+            solution=[],
+            black_to_move=record.first_color_black,
+            kill_type="",
+            difficulty="中等",
+            steps=len(record.move_strings),
+            variations=[]
+        )
+
+        self.game.load_puzzle(temp_puzzle)
+        self.elapsed_seconds = 0
+        self.timer.stop()
+
+        player_color = PieceColor.BLACK if record.first_color_black else PieceColor.RED
+        for i, move_str in enumerate(record.move_strings):
+            move = parse_move_str(self.game.board, move_str, self.game.current_turn)
+            if move is None:
+                continue
+            ok, msg = self.game.make_move(move.from_x, move.from_y, move.to_x, move.to_y)
+
+        self._record_step_notes = dict(record.step_notes)
+        self._record_step_deviations = dict(record.step_deviations)
+
+        self._saved_board = self.game.board.clone()
+        self._saved_board_history = [b.clone() for b in self.game.board_history]
+        self._saved_move_history = list(self.game.move_history)
+        self._saved_turn = self.game.current_turn
+        self._saved_solution_index = self.game.solution_step_index
+        self._saved_is_game_over = self.game.is_game_over
+        self._saved_game_result = self.game.game_result
+        self._saved_black_to_move = temp_puzzle.black_to_move
+        self._current_record = record
+
+        self.puzzle_name_label.setText(f"对局记录：{record.name}")
+        self._enter_review_mode(len(self.game.move_history) - 1)
 
     def _load_puzzle(self, puzzle_id: str):
         puzzle = get_puzzle_by_id(puzzle_id)
@@ -573,12 +634,14 @@ class MainWindow(QMainWindow):
         first_is_black = self._saved_black_to_move
 
         if step_index == -1:
-            if self.game.current_puzzle:
+            if self._saved_board_history:
+                display_board = self._saved_board_history[0].clone()
+            elif self.game.current_puzzle:
                 from ..core.utils import board_from_grid
                 display_board = board_from_grid(self.game.current_puzzle.initial_board)
-                current_turn = PC.BLACK if first_is_black else PC.RED
             else:
                 return
+            current_turn = PC.BLACK if first_is_black else PC.RED
         else:
             if step_index < len(self._saved_board_history):
                 display_board = self._saved_board_history[step_index].clone()
@@ -882,6 +945,7 @@ class MainWindow(QMainWindow):
             self._current_record.first_color_black = first_black
             self._current_record.initial_board = self.game.current_puzzle.initial_board
             self._current_record.step_notes = dict(self._record_step_notes)
+            self._current_record.step_deviations = dict(self._record_step_deviations)
             return self._current_record
 
         return GameRecord(
@@ -922,15 +986,19 @@ class MainWindow(QMainWindow):
 
         save_game_record(record)
         self._current_record = record
+        self.game_record_library.load_records()
 
         tag_info = ""
         if record.tags:
             tag_info = f"\n标签：{'、'.join(record.tags)}"
 
+        notes_preview = record.notes[:50] + ("..." if len(record.notes) > 50 else "")
+
         QMessageBox.information(
             self, "成功",
             f"对局记录已保存：\n\n  名称：{record.name}\n  步数：{len(record.move_strings)} 步"
-            f"{tag_info}\n  备注：{record.notes or '（无）'}\n\n可在题库中搜索此对局名称或标签查看。"
+            f"{tag_info}\n  备注：{notes_preview or '（无）'}\n\n"
+            f"可在左侧「对局记录」标签页中双击此记录直接进入复盘。"
         )
 
     def _on_edit_record_info(self):
@@ -979,10 +1047,14 @@ class MainWindow(QMainWindow):
 
             save_game_record(record)
             self._current_record = record
+            self.game_record_library.load_records()
 
             tag_text = f"\n标签：{'、'.join(record.tags)}" if record.tags else ""
             note_text = f"\n备注：{record.notes[:30]}{'...' if len(record.notes) > 30 else ''}" if record.notes else ""
-            QMessageBox.information(self, "已保存", f"对局信息已更新：{record.name}{tag_text}{note_text}")
+            QMessageBox.information(
+                self, "已保存",
+                f"对局信息已更新：{record.name}{tag_text}{note_text}\n\n可在左侧「对局记录」标签页找到。"
+            )
 
     def _on_import_pgn(self):
         file_path, _ = QFileDialog.getOpenFileName(
