@@ -283,6 +283,7 @@ class ReviewPanel(QWidget):
             self.jump_spin.blockSignals(True)
             self.jump_spin.setValue(index + 1)
             self.jump_spin.blockSignals(False)
+            self._refresh_solution()
             self.step_changed.emit(index)
 
     def set_solution(self, solution_list: List[str]):
@@ -381,10 +382,70 @@ class ReviewPanel(QWidget):
             self.solution_content_layout.addWidget(label)
             return
 
+        player_moves: List[Tuple[str, bool, str]] = []
+        for move_chinese, is_correct, deviation_type in self._move_list:
+            if not player_moves or len(player_moves) % 2 == 0:
+                if len(self._move_list) > 0 and self._move_list[0][1] is True:
+                    player_idx = len(player_moves)
+                    if player_idx < len(self._solution):
+                        player_moves.append((move_chinese, is_correct, deviation_type))
+            else:
+                pass
+
+        title_label = QLabel("【主线解法】")
+        title_label.setStyleSheet("color: #2c3e50; font-size: 12px; font-weight: bold; margin-top: 4px;")
+        self.solution_content_layout.addWidget(title_label)
+
         for i, move in enumerate(self._solution):
-            move_label = QLabel(f"第{i + 1}步：{move}")
-            move_label.setStyleSheet("color: #2c3e50; font-size: 12px;")
-            self.solution_content_layout.addWidget(move_label)
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(4, 2, 4, 2)
+            row_layout.setSpacing(8)
+
+            is_current = False
+            if self._current_step >= 0 and i < len(self._move_list):
+                if self._move_list and self._current_step >= 0:
+                    player_step = self._current_step // 2
+                    if player_step == i and self._current_step % 2 == 0:
+                        is_current = True
+
+            step_label = QLabel(f"第{i + 1}步:")
+            step_label.setFixedWidth(50)
+            step_label.setStyleSheet(
+                "color: #2980b9; font-weight: bold;" if is_current else "color: #666; font-size: 12px;"
+            )
+            row_layout.addWidget(step_label)
+
+            solution_label = QLabel(move)
+            solution_label.setStyleSheet(
+                "color: #27ae60; font-weight: bold; background-color: #eafaf1; padding: 2px 6px; border-radius: 3px;"
+                if is_current else "color: #2c3e50; font-size: 12px;"
+            )
+            row_layout.addWidget(solution_label)
+
+            row_layout.addStretch()
+
+            if i < len(self._move_list) and (i < len(self._move_list) or len(self._move_list) >= i * 2 + 1):
+                actual_idx = i * 2 if len(self._move_list) > 1 else i
+                if actual_idx < len(self._move_list):
+                    actual_move, is_correct, dev_type = self._move_list[actual_idx]
+                    if is_correct:
+                        status_text = f"你的走法：{actual_move} ✓"
+                        status_color = "#27ae60"
+                    else:
+                        status_text = f"你的走法：{actual_move} ✗"
+                        status_color = "#e74c3c"
+                    status_label = QLabel(status_text)
+                    status_label.setStyleSheet(f"color: {status_color}; font-size: 12px;")
+                    row_layout.addWidget(status_label)
+
+            self.solution_content_layout.addWidget(row)
+
+        if len(self._solution) >= 1:
+            extra_label = QLabel("\n【变着说明】同一步可能有多种可行杀法，本解法为推荐主线。")
+            extra_label.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+            extra_label.setWordWrap(True)
+            self.solution_content_layout.addWidget(extra_label)
 
     def _toggle_solution(self):
         self._solution_expanded = not self._solution_expanded

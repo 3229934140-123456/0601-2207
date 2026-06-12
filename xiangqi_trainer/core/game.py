@@ -6,8 +6,11 @@ from .board import Board
 from .pieces import PieceColor, PieceType
 from .move import Move
 from .rules import generate_moves, is_check, is_checkmate, is_stalemate
-from .utils import board_from_grid, parse_move_str, find_solution_move
-from ..data.puzzles import Puzzle
+from .utils import (
+    board_from_grid, parse_move_str, find_solution_move,
+    board_to_grid, PgnParseResult
+)
+from ..data.puzzles import Puzzle, create_empty_board
 from ..data.storage import Statistics, record_puzzle_result
 
 
@@ -54,7 +57,8 @@ class GameController:
         piece = self.board.get_piece(x, y)
         if piece is None or piece.color != self.current_turn:
             return []
-        return generate_moves(self.board, self.current_turn)
+        all_moves = generate_moves(self.board, self.current_turn)
+        return [m for m in all_moves if m.from_x == x and m.from_y == y]
 
     def make_move(self, from_x: int, from_y: int, to_x: int, to_y: int) -> Tuple[bool, str]:
         if self.is_game_over:
@@ -273,3 +277,94 @@ class GameController:
             self.hints_used,
             error_type
         )
+
+    def load_imported_pgn(self, pgn_result: PgnParseResult, as_puzzle: bool = False) -> Puzzle:
+        """加载导入的棋谱"""
+        grid = board_to_grid(pgn_result.initial_board)
+
+        if as_puzzle:
+            solution = []
+            for i, move in enumerate(pgn_result.moves):
+                if i % 2 == 0:
+                    solution.append(move.to_chinese())
+        else:
+            solution = [m.to_chinese() for m in pgn_result.moves]
+
+        puzzle_id = f"imported_{int(time.time())}"
+        name = pgn_result.name or f"导入棋谱_{time.strftime('%Y%m%d_%H%M%S')}"
+
+        puzzle = Puzzle(
+            id=puzzle_id,
+            name=name,
+            description=f"从棋谱文件导入，共{len(pgn_result.moves)}步",
+            difficulty="中等",
+            kill_type="自定义",
+            steps=len(solution) if solution else 1,
+            initial_board=grid,
+            solution=solution if as_puzzle else [],
+            black_to_move=False
+        )
+
+        self.load_puzzle(puzzle)
+
+        if not as_puzzle:
+            self.board_history = []
+            self.move_history = []
+            temp_board = pgn_result.initial_board.clone()
+            for move in pgn_result.moves:
+                self.board_history.append(temp_board.clone())
+                record = MoveRecord(move=move, is_correct=True, deviation_type="", time_taken=0.5)
+                self.move_history.append(record)
+                temp_board.move_piece(move.from_x, move.from_y, move.to_x, move.to_y)
+
+            if self.board_history:
+                self.board = self.board_history[-1].clone()
+                last_move = self.move_history[-1].move
+                self.board.move_piece(last_move.from_x, last_move.from_y, last_move.to_x, last_move.to_y)
+                self.current_turn = (PieceColor.BLACK if len(pgn_result.moves) % 2 == 0
+                                     else PieceColor.RED)
+                self.is_game_over = False
+
+        return puzzle
+
+    def get_board_at_step(self, step_index: int) -> Optional[Board]:
+        """获取指定步数的棋盘状态，用于复盘"""
+        if step_index < -1 or step_index >= len(self.board_history):
+            return None
+
+        if step_index == -1:
+            if self.current_puzzle:
+                return board_from_grid(self.current_puzzle.initial_board)
+            return None
+
+        return self.board_history[step_index].clone()
+
+    def save_current_as_custom_puzzle(self) -> Optional[Puzzle]:
+        """保存当前棋盘为自定义残局"""
+        grid = board_to_grid(self.board)
+
+        has_red_king = False
+        has_black_king = False
+        for row in grid:
+            for ch in row:
+                if ch == 'K':
+                    has_red_king = True
+                elif ch == 'k':
+                    has_black_king = True
+
+        if not has_red_king or not has_black_king:
+            return None
+
+        puzzle_id = f"custom_{int(time.time())}"
+        puzzle = Puzzle(
+            id=puzzle_id,
+            name=f"自定义残局_{time.strftime('%Y%m%d_%H%M%S')}",
+            description="用户自定义保存的残局",
+            difficulty="中等",
+            kill_type="自定义",
+            steps=3,
+            initial_board=grid,
+            solution=[],
+            black_to_move=(self.current_turn == PieceColor.BLACK)
+        )
+        return puzzle

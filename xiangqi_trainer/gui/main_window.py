@@ -21,7 +21,9 @@ from ..core.ai import AIOpponent
 from ..core.board import Board
 from ..core.pieces import PieceColor
 from ..core.rules import is_check
-from ..core.utils import board_to_grid, board_from_grid, parse_move_str
+from ..core.utils import (
+    board_to_grid, board_from_grid, parse_move_str, parse_pgn_text
+)
 
 from ..data.puzzles import get_all_puzzles, get_puzzle_by_id, Puzzle
 from ..data.storage import (
@@ -43,6 +45,14 @@ class MainWindow(QMainWindow):
         self.large_pieces = False
         self.ai_thinking = False
         self.review_mode = False
+
+        self._saved_board = None
+        self._saved_board_history = []
+        self._saved_move_history = []
+        self._saved_turn = PieceColor.RED
+        self._saved_solution_index = 0
+        self._saved_is_game_over = False
+        self._saved_game_result = ""
 
         self.timer = QTimer()
         self.timer.timeout.connect(self._update_timer)
@@ -326,6 +336,23 @@ class MainWindow(QMainWindow):
 
         self._update_review_panel()
 
+    def _refresh_after_load(self, puzzle: Puzzle):
+        """加载残局或导入棋谱后刷新界面"""
+        self.board_widget.set_board(self.game.board)
+        self.board_widget.clear_selection()
+        self.puzzle_name_label.setText(puzzle.name)
+
+        self.hint_panel.reset()
+        self.hint_panel.set_score(self.game.score)
+
+        self.elapsed_seconds = 0
+        if not self.review_mode:
+            self.timer.start(1000)
+        self._update_turn_label()
+        self._update_check_status()
+        self._update_buttons()
+        self._update_review_panel()
+
     def _on_puzzle_selected(self, puzzle_id: str):
         self._load_puzzle(puzzle_id)
 
@@ -474,13 +501,22 @@ class MainWindow(QMainWindow):
 
         self.review_mode = True
         self.timer.stop()
+
+        self._saved_board = self.game.board.clone()
+        self._saved_board_history = [b.clone() for b in self.game.board_history]
+        self._saved_move_history = list(self.game.move_history)
+        self._saved_turn = self.game.current_turn
+        self._saved_solution_index = self.game.solution_step_index
+        self._saved_is_game_over = self.game.is_game_over
+        self._saved_game_result = self.game.game_result
+
         self._enter_review_mode(len(self.game.move_history) - 1)
 
     def _enter_review_mode(self, step_index: int):
         self.review_mode = True
 
         move_list = []
-        for record in self.game.move_history:
+        for record in self._saved_move_history:
             move_list.append((
                 record.move.to_chinese(),
                 record.is_correct,
@@ -488,7 +524,7 @@ class MainWindow(QMainWindow):
             ))
 
         player_color = PieceColor.BLACK if self.game.current_puzzle.black_to_move else PieceColor.RED
-        player_moves = [m for m in self.game.move_history if m.move.color == player_color]
+        player_moves = [m for m in self._saved_move_history if m.move.color == player_color]
         correct_count = sum(1 for m in player_moves if m.is_correct)
         total_time = sum(m.time_taken for m in player_moves)
         avg_time = total_time / len(player_moves) if player_moves else 0
@@ -514,37 +550,76 @@ class MainWindow(QMainWindow):
         self._update_buttons()
 
     def _show_board_at_step(self, step_index: int):
-        if self.game.current_puzzle is None:
+        if step_index < -1 or step_index >= len(self._saved_move_history):
             return
 
-        self.game.load_puzzle(self.game.current_puzzle)
+        if step_index == -1:
+            if self.game.current_puzzle:
+                from ..core.utils import board_from_grid
+                display_board = board_from_grid(self.game.current_puzzle.initial_board)
+                current_turn = (PieceColor.BLACK if self.game.current_puzzle.black_to_move
+                                else PieceColor.RED)
+            else:
+                return
+        else:
+            if step_index < len(self._saved_board_history):
+                display_board = self._saved_board_history[step_index].clone()
+                last_move = self._saved_move_history[step_index].move
+                display_board.move_piece(last_move.from_x, last_move.from_y,
+                                         last_move.to_x, last_move.to_y)
+            else:
+                display_board = self._saved_board.clone()
+            current_turn = (PieceColor.BLACK if (step_index + 1) % 2 == 0
+                            else PieceColor.RED)
+            if self.game.current_puzzle and self.game.current_puzzle.black_to_move:
+                current_turn = (PieceColor.RED if (step_index + 1) % 2 == 0
+                                else PieceColor.BLACK)
 
-        for i in range(step_index + 1):
-            if i < len(self.game.move_history):
-                record = self.game.move_history[i]
-                self.game.make_move(
-                    record.move.from_x, record.move.from_y,
-                    record.move.to_x, record.move.to_y
-                )
-
-        self.board_widget.set_board(self.game.board)
-        if step_index >= 0 and step_index < len(self.game.move_history):
-            record = self.game.move_history[step_index]
+        self.board_widget.set_board(display_board)
+        if step_index >= 0 and step_index < len(self._saved_move_history):
+            record = self._saved_move_history[step_index]
             self.board_widget.highlight_last_move(
                 record.move.from_x, record.move.from_y,
                 record.move.to_x, record.move.to_y
             )
         self.board_widget.clear_selection()
-        self._update_turn_label()
-        self._update_check_status()
+
+        from ..core.rules import is_check as _is_check
+        if _is_check(display_board, current_turn):
+            self.check_label.setText("将军！")
+        else:
+            self.check_label.setText("")
+        if current_turn == PieceColor.RED:
+            self.turn_label.setText("红方走")
+            self.turn_label.setStyleSheet(
+                "color: #C41E3A; font-weight: bold; font-size: 14px;"
+            )
+        else:
+            self.turn_label.setText("黑方走")
+            self.turn_label.setStyleSheet(
+                "color: #333333; font-weight: bold; font-size: 14px;"
+            )
 
     def _on_review_step_changed(self, step_index: int):
         self._show_board_at_step(step_index)
 
     def _on_review_closed(self):
+        self.game.board = self._saved_board
+        self.game.board_history = self._saved_board_history
+        self.game.move_history = self._saved_move_history
+        self.game.current_turn = self._saved_turn
+        self.game.solution_step_index = self._saved_solution_index
+        self.game.is_game_over = self._saved_is_game_over
+        self.game.game_result = self._saved_game_result
+
         self.review_mode = False
-        self._load_puzzle(self.game.current_puzzle.id)
+        self.board_widget.set_board(self.game.board)
+        self.board_widget.clear_selection()
+        self._update_turn_label()
+        self._update_check_status()
         self._update_buttons()
+        self._update_review_panel()
+        self.timer.start(1000)
 
     def _on_next_puzzle(self):
         all_puzzles = get_all_puzzles() + get_custom_puzzles()
@@ -760,14 +835,83 @@ class MainWindow(QMainWindow):
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-
-            QMessageBox.information(
-                self, "提示",
-                "棋谱文本导入功能开发中，暂支持简单的棋盘布局导入。\n\n"
-                "请使用棋盘编辑功能创建自定义残局。"
-            )
+        except UnicodeDecodeError:
+            try:
+                with open(file_path, 'r', encoding='gbk') as f:
+                    content = f.read()
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "导入失败",
+                    f"无法读取文件：文件编码不是 UTF-8 或 GBK\n\n详细错误：{str(e)}"
+                )
+                return
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"导入失败：{str(e)}")
+            QMessageBox.critical(self, "导入失败", f"读取文件出错：{str(e)}")
+            return
+
+        result = parse_pgn_text(content)
+
+        if not result.success:
+            help_text = (
+                "\n\n支持的棋谱格式说明：\n"
+                "  1. 中文记谱：每行一个走法，如 炮二平五、马8进7\n"
+                "  2. 简写记谱：R2+5、C2=5、N8+7\n"
+                "  3. 可加标签 [Name \"名称\"] [Puzzle \"1\"]\n"
+                "  4. 自定义初始局面：[Board \"rnbakabnr/9/1c5c1/...\"]\n\n"
+                "  红方：帅车马相仕炮兵 (中文数字 一二三四五六七八九)\n"
+                "  黑方：将车马象士卒砲 (阿拉伯数字 1-9)"
+            )
+            QMessageBox.critical(self, "导入失败", result.error_message + help_text)
+            return
+
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QRadioButton, QDialogButtonBox, QLabel
+
+        choice_dialog = QDialog(self)
+        choice_dialog.setWindowTitle("导入棋谱")
+        dialog_layout = QVBoxLayout(choice_dialog)
+
+        info_label = QLabel(
+            f"成功解析棋谱：\n"
+            f"  名称：{result.name or '未命名'}\n"
+            f"  总步数：{len(result.moves)} 步\n"
+            f"  初始局面：{'标准开局' if not result.name else '自定义局面'}\n\n"
+            f"请选择导入方式："
+        )
+        info_label.setWordWrap(True)
+        dialog_layout.addWidget(info_label)
+
+        radio_review = QRadioButton("作为完整对局导入（可复盘走法）")
+        radio_puzzle = QRadioButton("作为残局题库保存（红方招法为解法）")
+        radio_review.setChecked(True)
+        dialog_layout.addWidget(radio_review)
+        dialog_layout.addWidget(radio_puzzle)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(choice_dialog.accept)
+        btn_box.rejected.connect(choice_dialog.reject)
+        dialog_layout.addWidget(btn_box)
+
+        if choice_dialog.exec_() != QDialog.Accepted:
+            return
+
+        as_puzzle = radio_puzzle.isChecked()
+
+        puzzle = self.game.load_imported_pgn(result, as_puzzle=as_puzzle)
+
+        if as_puzzle:
+            add_custom_puzzle(puzzle)
+            all_puzzles = get_all_puzzles() + get_custom_puzzles()
+            self.puzzle_library.load_puzzles(all_puzzles)
+            QMessageBox.information(
+                self, "导入成功",
+                f"已保存到自定义题库：\n\n  {puzzle.name}\n  共 {len(puzzle.solution)} 步解法"
+            )
+        else:
+            self._refresh_after_load(puzzle)
+            QMessageBox.information(
+                self, "导入成功",
+                f"已加载对局，可在复盘面板中查看 {len(result.moves)} 步走法"
+            )
 
     def _on_about(self):
         QMessageBox.about(

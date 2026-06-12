@@ -41,8 +41,6 @@ class PuzzleLibrary(QWidget):
         kill_type_label.setFixedWidth(70)
         self.kill_type_combo = QComboBox()
         self.kill_type_combo.addItem("全部")
-        for kt in KILL_TYPES:
-            self.kill_type_combo.addItem(kt)
         self.kill_type_combo.currentIndexChanged.connect(self._on_filter_changed)
         kill_type_layout.addWidget(kill_type_label)
         kill_type_layout.addWidget(self.kill_type_combo)
@@ -53,8 +51,6 @@ class PuzzleLibrary(QWidget):
         difficulty_label.setFixedWidth(70)
         self.difficulty_combo = QComboBox()
         self.difficulty_combo.addItem("全部")
-        for d in DIFFICULTIES:
-            self.difficulty_combo.addItem(d)
         self.difficulty_combo.currentIndexChanged.connect(self._on_filter_changed)
         difficulty_layout.addWidget(difficulty_label)
         difficulty_layout.addWidget(self.difficulty_combo)
@@ -64,16 +60,8 @@ class PuzzleLibrary(QWidget):
         steps_label = QLabel("步数：")
         steps_label.setFixedWidth(70)
         self.steps_combo = QComboBox()
-        self._steps_options = [
-            ("全部", None, None),
-            ("1步", 1, 1),
-            ("2步", 2, 2),
-            ("3步", 3, 3),
-            ("5步", 5, 5),
-            ("7步", 7, 7),
-        ]
-        for label, _, _ in self._steps_options:
-            self.steps_combo.addItem(label)
+        self._steps_options = [("全部", None, None)]
+        self.steps_combo.addItem("全部")
         self.steps_combo.currentIndexChanged.connect(self._on_filter_changed)
         steps_layout.addWidget(steps_label)
         steps_layout.addWidget(self.steps_combo)
@@ -97,7 +85,58 @@ class PuzzleLibrary(QWidget):
 
     def load_puzzles(self, puzzles_list: List[Puzzle]):
         self._all_puzzles = puzzles_list
+        self._refresh_filter_options()
         self._apply_filters()
+
+    def _refresh_filter_options(self):
+        """根据实际残局数据动态生成筛选项，避免空筛选"""
+        kill_types = set()
+        difficulties = set()
+        steps_set = set()
+
+        for puzzle in self._all_puzzles:
+            if puzzle.kill_type:
+                kill_types.add(puzzle.kill_type)
+            if puzzle.difficulty:
+                difficulties.add(puzzle.difficulty)
+            if hasattr(puzzle, 'steps') and puzzle.steps:
+                steps_set.add(puzzle.steps)
+            elif hasattr(puzzle, 'min_steps') and puzzle.min_steps:
+                steps_set.add(puzzle.min_steps)
+
+        current_kill = self.kill_type_combo.currentText()
+        self.kill_type_combo.blockSignals(True)
+        self.kill_type_combo.clear()
+        self.kill_type_combo.addItem("全部")
+        for kt in sorted(kill_types, key=lambda x: KILL_TYPES.index(x) if x in KILL_TYPES else 999):
+            self.kill_type_combo.addItem(kt)
+        idx = self.kill_type_combo.findText(current_kill)
+        self.kill_type_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.kill_type_combo.blockSignals(False)
+
+        current_diff = self.difficulty_combo.currentText()
+        self.difficulty_combo.blockSignals(True)
+        self.difficulty_combo.clear()
+        self.difficulty_combo.addItem("全部")
+        for d in sorted(difficulties, key=lambda x: DIFFICULTIES.index(x) if x in DIFFICULTIES else 999):
+            self.difficulty_combo.addItem(d)
+        idx = self.difficulty_combo.findText(current_diff)
+        self.difficulty_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.difficulty_combo.blockSignals(False)
+
+        current_steps_idx = self.steps_combo.currentIndex()
+        self.steps_combo.blockSignals(True)
+        self.steps_combo.clear()
+        self._steps_options = [("全部", None, None)]
+        self.steps_combo.addItem("全部")
+        for s in sorted(steps_set):
+            self._steps_options.append((f"{s}步", s, s))
+            self.steps_combo.addItem(f"{s}步")
+        if current_steps_idx >= 0 and current_steps_idx < len(self._steps_options):
+            self.steps_combo.setCurrentIndex(current_steps_idx)
+        else:
+            self.steps_combo.setCurrentIndex(0)
+        self.steps_combo.blockSignals(False)
 
     def set_filter(
         self,
@@ -148,8 +187,15 @@ class PuzzleLibrary(QWidget):
             if difficulty_text != "全部" and puzzle.difficulty != difficulty_text:
                 continue
             if min_steps is not None and max_steps is not None:
-                if puzzle.steps < min_steps or puzzle.steps > max_steps:
-                    continue
+                puzzle_steps = getattr(puzzle, 'steps', None)
+                if puzzle_steps is None:
+                    puzzle_min = getattr(puzzle, 'min_steps', 1)
+                    puzzle_max = getattr(puzzle, 'max_steps', 99)
+                    if puzzle_max < min_steps or puzzle_min > max_steps:
+                        continue
+                else:
+                    if puzzle_steps < min_steps or puzzle_steps > max_steps:
+                        continue
             self._filtered_puzzles.append(puzzle)
 
         self._refresh_list()
@@ -167,12 +213,13 @@ class PuzzleLibrary(QWidget):
                 "困难": "#e74c3c",
             }.get(puzzle.difficulty, "#333333")
 
-            display_text = (
-                f"{puzzle.name}\n"
-                f"  难度：<span style='color:{difficulty_color};'>{puzzle.difficulty}</span>"
-                f"  |  步数：{puzzle.steps}步"
-                f"  |  类型：{puzzle.kill_type}"
-            )
+            puzzle_steps = getattr(puzzle, 'steps', None)
+            if puzzle_steps is None:
+                min_s = getattr(puzzle, 'min_steps', 1)
+                max_s = getattr(puzzle, 'max_steps', 1)
+                steps_str = f"{min_s}-{max_s}步" if min_s != max_s else f"{min_s}步"
+            else:
+                steps_str = f"{puzzle_steps}步"
 
             widget_item = QWidget()
             widget_layout = QVBoxLayout(widget_item)
@@ -191,7 +238,7 @@ class PuzzleLibrary(QWidget):
             info_text = (
                 f"难度：<span style='color:{difficulty_color};font-weight:bold;'>{puzzle.difficulty}</span>"
                 f"&nbsp;&nbsp;|&nbsp;&nbsp;"
-                f"步数：{puzzle.steps}步"
+                f"步数：{steps_str}"
                 f"&nbsp;&nbsp;|&nbsp;&nbsp;"
                 f"类型：{puzzle.kill_type}"
             )
