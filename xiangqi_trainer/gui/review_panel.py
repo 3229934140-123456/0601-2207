@@ -1,7 +1,8 @@
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QFrame, QScrollArea,
-    QSpinBox, QToolButton, QSizePolicy, QGridLayout
+    QSpinBox, QToolButton, QSizePolicy, QGridLayout, QSlider,
+    QTextEdit
 )
 from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtGui import QFont
@@ -11,6 +12,7 @@ from typing import Optional, List, Tuple, Dict
 class ReviewPanel(QWidget):
     step_changed = pyqtSignal(int)
     review_closed = pyqtSignal()
+    note_changed = pyqtSignal(int, str)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -20,6 +22,9 @@ class ReviewPanel(QWidget):
         self._variations: List[str] = []
         self._solution_expanded = True
         self._analysis: Dict = {}
+        self._step_notes: Dict[int, str] = {}
+        self._step_deviations: Dict[int, List[str]] = {}
+        self._updating_note = False
         self._init_ui()
 
     def _init_ui(self):
@@ -218,6 +223,63 @@ class ReviewPanel(QWidget):
 
         main_layout.addWidget(nav_frame)
 
+        timeline_frame = QFrame()
+        timeline_frame.setFrameShape(QFrame.NoFrame)
+        timeline_layout = QHBoxLayout(timeline_frame)
+        timeline_layout.setContentsMargins(0, 4, 0, 4)
+        timeline_layout.setSpacing(8)
+
+        self.start_button = QPushButton("⏮ 开局")
+        self.start_button.setFixedWidth(70)
+        self.start_button.setStyleSheet("""
+            QPushButton {
+                background-color: #8e44ad;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 5px 10px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #7d3c98; }
+            QPushButton:disabled {
+                background-color: #bdc3c7;
+                color: #7f8c8d;
+            }
+        """)
+        self.start_button.clicked.connect(self._on_start_clicked)
+        timeline_layout.addWidget(self.start_button)
+
+        self.timeline_slider = QSlider(Qt.Horizontal)
+        self.timeline_slider.setRange(0, 0)
+        self.timeline_slider.setTickPosition(QSlider.TicksBelow)
+        self.timeline_slider.setTickInterval(1)
+        self.timeline_slider.valueChanged.connect(self._on_timeline_changed)
+        timeline_layout.addWidget(self.timeline_slider, 1)
+
+        self.end_button = QPushButton("终局 ⏭")
+        self.end_button.setFixedWidth(70)
+        self.end_button.setStyleSheet("""
+            QPushButton {
+                background-color: #8e44ad;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 5px 10px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #7d3c98; }
+            QPushButton:disabled {
+                background-color: #bdc3c7;
+                color: #7f8c8d;
+            }
+        """)
+        self.end_button.clicked.connect(self._on_end_clicked)
+        timeline_layout.addWidget(self.end_button)
+
+        main_layout.addWidget(timeline_frame)
+
         solution_frame = QFrame()
         solution_frame.setFrameShape(QFrame.StyledPanel)
         solution_layout = QVBoxLayout(solution_frame)
@@ -262,6 +324,45 @@ class ReviewPanel(QWidget):
 
         main_layout.addWidget(solution_frame)
 
+        notes_frame = QFrame()
+        notes_frame.setFrameShape(QFrame.StyledPanel)
+        notes_layout = QVBoxLayout(notes_frame)
+        notes_layout.setContentsMargins(10, 8, 10, 8)
+        notes_layout.setSpacing(4)
+
+        notes_header = QHBoxLayout()
+        notes_title = QLabel("学习笔记")
+        notes_title.setStyleSheet("font-weight: bold; color: #333;")
+        notes_header.addWidget(notes_title)
+        notes_header.addStretch()
+
+        self.current_step_note_label = QLabel("（请选择某一步）")
+        self.current_step_note_label.setStyleSheet("color: #666666; font-size: 12px;")
+        notes_header.addWidget(self.current_step_note_label)
+
+        notes_layout.addLayout(notes_header)
+
+        self.deviations_label = QLabel("")
+        self.deviations_label.setStyleSheet("color: #e74c3c; font-size: 12px;")
+        self.deviations_label.setWordWrap(True)
+        notes_layout.addWidget(self.deviations_label)
+
+        self.note_edit = QTextEdit()
+        self.note_edit.setPlaceholderText("为当前步写下心得、错招分析或思考过程...")
+        self.note_edit.setMaximumHeight(80)
+        self.note_edit.setStyleSheet("""
+            QTextEdit {
+                border: 1px solid #bdc3c7;
+                border-radius: 4px;
+                padding: 4px;
+                font-size: 12px;
+            }
+        """)
+        self.note_edit.textChanged.connect(self._on_note_text_changed)
+        notes_layout.addWidget(self.note_edit)
+
+        main_layout.addWidget(notes_frame)
+
     def load_review(self, move_list: List[Tuple[str, bool, str]], analysis: Dict):
         self._move_list = move_list
         self._analysis = analysis
@@ -275,6 +376,10 @@ class ReviewPanel(QWidget):
         self.jump_spin.setRange(1, max(1, total_steps))
         self.jump_spin.setValue(1)
 
+        self.timeline_slider.blockSignals(True)
+        self.timeline_slider.setRange(0, max(0, total_steps - 1))
+        self.timeline_slider.blockSignals(False)
+
     def set_current_step(self, index: int):
         if 0 <= index < len(self._move_list):
             self._current_step = index
@@ -284,6 +389,9 @@ class ReviewPanel(QWidget):
             self.jump_spin.blockSignals(True)
             self.jump_spin.setValue(index + 1)
             self.jump_spin.blockSignals(False)
+            self.timeline_slider.blockSignals(True)
+            self.timeline_slider.setValue(index)
+            self.timeline_slider.blockSignals(False)
             self._refresh_solution()
             self.step_changed.emit(index)
 
@@ -294,6 +402,15 @@ class ReviewPanel(QWidget):
     def set_variations(self, variations: List[str]):
         self._variations = variations
         self._refresh_solution()
+
+    def set_step_notes(self, step_notes: Dict[int, str]):
+        self._step_notes = dict(step_notes)
+
+    def set_step_deviations(self, deviations: Dict[int, List[str]]):
+        self._step_deviations = dict(deviations)
+
+    def get_step_notes(self) -> Dict[int, str]:
+        return dict(self._step_notes)
 
     def _refresh_move_list(self):
         self.move_list_widget.clear()
@@ -525,14 +642,68 @@ class ReviewPanel(QWidget):
     def _on_jump_changed(self, value: int):
         self.set_current_step(value - 1)
 
+    def _on_start_clicked(self):
+        if self._move_list:
+            self.set_current_step(0)
+
+    def _on_end_clicked(self):
+        if self._move_list:
+            self.set_current_step(len(self._move_list) - 1)
+
+    def _on_timeline_changed(self, value: int):
+        self.set_current_step(value)
+
     def _on_close_clicked(self):
         self.review_closed.emit()
 
     def _update_nav_buttons(self):
         self.prev_button.setEnabled(self._current_step > 0)
         self.next_button.setEnabled(self._current_step < len(self._move_list) - 1)
+        self.start_button.setEnabled(self._current_step > 0)
+        self.end_button.setEnabled(self._current_step < len(self._move_list) - 1)
 
     def _update_step_info(self):
         total = len(self._move_list)
         current = self._current_step + 1 if self._current_step >= 0 else 0
         self.step_info_label.setText(f"{current} / {total}")
+
+        if self._current_step >= 0:
+            self.current_step_note_label.setText(f"第{current}步")
+
+            self._updating_note = True
+            note = self._step_notes.get(self._current_step, "")
+            self.note_edit.setPlainText(note)
+            self._updating_note = False
+
+            deviations = self._step_deviations.get(self._current_step, [])
+            if deviations:
+                dev_text = "⚠ 常见错招：" + "、".join(deviations)
+                self.deviations_label.setText(dev_text)
+                self.deviations_label.show()
+            else:
+                _, is_correct, dev_type = self._move_list[self._current_step]
+                if not is_correct:
+                    self.deviations_label.setText(
+                        f"⚠ 此步走法有误：{dev_type or '偏离主线'}"
+                    )
+                    self.deviations_label.show()
+                else:
+                    self.deviations_label.setText("")
+                    self.deviations_label.hide()
+        else:
+            self.current_step_note_label.setText("（请选择某一步）")
+            self._updating_note = True
+            self.note_edit.setPlainText("")
+            self._updating_note = False
+            self.deviations_label.setText("")
+            self.deviations_label.hide()
+
+    def _on_note_text_changed(self):
+        if self._updating_note or self._current_step < 0:
+            return
+        text = self.note_edit.toPlainText()
+        if text:
+            self._step_notes[self._current_step] = text
+        elif self._current_step in self._step_notes:
+            del self._step_notes[self._current_step]
+        self.note_changed.emit(self._current_step, text)

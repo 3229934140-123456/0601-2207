@@ -15,6 +15,21 @@ class BestRecord:
 
 
 @dataclass
+class GameRecord:
+    id: str
+    name: str
+    created_at: str = ""
+    move_strings: List[str] = field(default_factory=list)
+    first_color_black: bool = False
+    initial_board: List[List[str]] = field(default_factory=list)
+    notes: str = ""
+    tags: List[str] = field(default_factory=list)
+    step_notes: Dict[int, str] = field(default_factory=dict)
+    step_deviations: Dict[int, List[str]] = field(default_factory=dict)
+    puzzle_id: Optional[str] = None
+
+
+@dataclass
 class Statistics:
     total_puzzles: int = 0
     correct_count: int = 0
@@ -63,6 +78,10 @@ def get_stats_path() -> str:
 
 def get_custom_puzzles_path() -> str:
     return os.path.join(get_config_dir(), 'custom_puzzles.json')
+
+
+def get_game_records_path() -> str:
+    return os.path.join(get_config_dir(), 'game_records.json')
 
 
 def load_stats() -> Statistics:
@@ -207,3 +226,103 @@ def delete_custom_puzzle(puzzle_id: str) -> bool:
         return False
     _save_custom_puzzles(filtered)
     return True
+
+
+def game_record_to_dict(gr: GameRecord) -> dict:
+    return {
+        'id': gr.id,
+        'name': gr.name,
+        'created_at': gr.created_at,
+        'move_strings': gr.move_strings,
+        'first_color_black': gr.first_color_black,
+        'initial_board': gr.initial_board,
+        'notes': gr.notes,
+        'tags': gr.tags,
+        'step_notes': {str(k): v for k, v in gr.step_notes.items()},
+        'step_deviations': {str(k): v for k, v in gr.step_deviations.items()},
+        'puzzle_id': gr.puzzle_id,
+    }
+
+
+def game_record_from_dict(data: dict) -> GameRecord:
+    step_notes = {}
+    for k, v in data.get('step_notes', {}).items():
+        try:
+            step_notes[int(k)] = v
+        except ValueError:
+            pass
+    step_deviations = {}
+    for k, v in data.get('step_deviations', {}).items():
+        try:
+            step_deviations[int(k)] = v
+        except ValueError:
+            pass
+    return GameRecord(
+        id=data['id'],
+        name=data['name'],
+        created_at=data.get('created_at', ''),
+        move_strings=data.get('move_strings', []),
+        first_color_black=data.get('first_color_black', False),
+        initial_board=data.get('initial_board', []),
+        notes=data.get('notes', ''),
+        tags=data.get('tags', []),
+        step_notes=step_notes,
+        step_deviations=step_deviations,
+        puzzle_id=data.get('puzzle_id'),
+    )
+
+
+def get_game_records() -> List[GameRecord]:
+    path = get_game_records_path()
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return [game_record_from_dict(d) for d in data]
+    except (json.JSONDecodeError, IOError):
+        return []
+
+
+def _save_game_records(records: List[GameRecord]) -> None:
+    path = get_game_records_path()
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump([game_record_to_dict(r) for r in records], f, ensure_ascii=False, indent=2)
+    except IOError:
+        pass
+
+
+def save_game_record(record: GameRecord) -> None:
+    records = get_game_records()
+    for i, r in enumerate(records):
+        if r.id == record.id:
+            records[i] = record
+            _save_game_records(records)
+            return
+    records.append(record)
+    _save_game_records(records)
+
+
+def delete_game_record(record_id: str) -> bool:
+    records = get_game_records()
+    filtered = [r for r in records if r.id != record_id]
+    if len(filtered) == len(records):
+        return False
+    _save_game_records(filtered)
+    return True
+
+
+def find_game_records_by_tag(tag: str) -> List[GameRecord]:
+    return [r for r in get_game_records() if tag in r.tags]
+
+
+def find_game_records_by_text(text: str) -> List[GameRecord]:
+    text_lower = text.lower()
+    result = []
+    for r in get_game_records():
+        if (text_lower in r.name.lower()
+                or text_lower in r.notes.lower()
+                or any(text_lower in t.lower() for t in r.tags)):
+            result.append(r)
+    return result
