@@ -296,6 +296,8 @@ class PgnParseResult:
         self.is_puzzle = False
         self.puzzle_solution: List[str] = []
         self.final_board: Optional[Board] = None
+        self.first_move_color = PieceColor.RED
+        self.final_color = PieceColor.RED
 
 
 def parse_pgn_text(content: str) -> PgnParseResult:
@@ -326,11 +328,13 @@ def parse_pgn_text(content: str) -> PgnParseResult:
             elif tag_name == 'puzzle':
                 result.is_puzzle = tag_value.lower() in ('1', 'true', 'yes', '是')
             elif tag_name == 'board' or tag_name == 'fen':
-                board, err = _parse_fen_board(tag_value)
+                board, color, err = _parse_fen_board(tag_value)
                 if board is None:
                     result.error_message = f"解析初始局面失败：{err}"
                     return result
                 result.initial_board = board
+                if color is not None:
+                    result.first_move_color = color
             continue
 
         if line.startswith('#') or line.startswith(';'):
@@ -350,7 +354,7 @@ def parse_pgn_text(content: str) -> PgnParseResult:
         return result
 
     board = result.initial_board.clone()
-    current_color = PieceColor.RED
+    current_color = result.first_move_color
     moves_count = 0
 
     for token in all_move_tokens:
@@ -370,7 +374,8 @@ def parse_pgn_text(content: str) -> PgnParseResult:
                 f"可能原因：\n"
                 f"1. 走法格式错误（应为：炮二平五 / 马8进7 / R2+5 等）\n"
                 f"2. 当前局面中该位置没有对应棋子\n"
-                f"3. 该棋子没有符合记谱的合法走法"
+                f"3. 该棋子没有符合记谱的合法走法\n"
+                f"4. 轮次错误（当前应为{'红方' if current_color == PieceColor.RED else '黑方'}走）"
             )
             return result
 
@@ -391,7 +396,7 @@ def parse_pgn_text(content: str) -> PgnParseResult:
 
         result.moves.append(move)
         result.move_strings.append(token)
-        if result.is_puzzle and moves_count % 2 == 0:
+        if result.is_puzzle and current_color == PieceColor.RED:
             result.puzzle_solution.append(move.to_chinese())
 
         board.move_piece(move.from_x, move.from_y, move.to_x, move.to_y)
@@ -400,24 +405,34 @@ def parse_pgn_text(content: str) -> PgnParseResult:
 
     result.success = True
     result.final_board = board
+    result.final_color = current_color
     return result
 
 
-def _parse_fen_board(fen: str) -> Tuple[Optional[Board], str]:
+def _parse_fen_board(fen: str) -> Tuple[Optional[Board], Optional[PieceColor], str]:
     """
     解析简化版FEN格式
     格式：用 / 分隔每行，数字表示空位数，字母表示棋子
     例：rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w
+    返回：(board, side_to_move, error_message)
     """
     fen = fen.strip()
+    side_to_move = None
     if ' ' in fen:
-        board_part = fen.split(' ')[0]
+        parts = fen.split(' ')
+        board_part = parts[0]
+        if len(parts) > 1:
+            side_char = parts[1].lower()
+            if side_char in ('w', 'r', '红'):
+                side_to_move = PieceColor.RED
+            elif side_char in ('b', '黑'):
+                side_to_move = PieceColor.BLACK
     else:
         board_part = fen
 
     rows = board_part.split('/')
     if len(rows) != 10:
-        return None, f"需要10行棋子数据，实际只有{len(rows)}行"
+        return None, None, f"需要10行棋子数据，实际只有{len(rows)}行"
 
     grid = [['' for _ in range(9)] for _ in range(10)]
 
@@ -427,16 +442,16 @@ def _parse_fen_board(fen: str) -> Tuple[Optional[Board], str]:
             if ch.isdigit():
                 count = int(ch)
                 if col + count > 9:
-                    return None, f"第{row_idx + 1}行棋子数量超过9列"
+                    return None, None, f"第{row_idx + 1}行棋子数量超过9列"
                 col += count
             else:
                 if col >= 9:
-                    return None, f"第{row_idx + 1}行棋子数量超过9列"
+                    return None, None, f"第{row_idx + 1}行棋子数量超过9列"
                 if ch not in PIECE_CHAR_MAP:
-                    return None, f"无法识别的棋子字符：{ch}"
+                    return None, None, f"无法识别的棋子字符：{ch}"
                 grid[row_idx][col] = ch
                 col += 1
         if col != 9:
-            return None, f"第{row_idx + 1}行需要9列，实际{col}列"
+            return None, None, f"第{row_idx + 1}行需要9列，实际{col}列"
 
-    return board_from_grid(grid), ""
+    return board_from_grid(grid), side_to_move, ""

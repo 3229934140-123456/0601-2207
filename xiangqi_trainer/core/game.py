@@ -60,6 +60,20 @@ class GameController:
         all_moves = generate_moves(self.board, self.current_turn)
         return [m for m in all_moves if m.from_x == x and m.from_y == y]
 
+    def get_mating_variations(self) -> List[Tuple[str, Move]]:
+        """获取当前局面下所有能将死对方的走法（作为变着）"""
+        from .rules import is_checkmate
+        mating_moves = []
+        all_moves = generate_moves(self.board, self.current_turn)
+        for move in all_moves:
+            temp_board = self.board.clone()
+            temp_board.move_piece(move.from_x, move.from_y, move.to_x, move.to_y)
+            opponent = (PieceColor.BLACK if self.current_turn == PieceColor.RED
+                       else PieceColor.RED)
+            if is_checkmate(temp_board, opponent):
+                mating_moves.append((move.to_chinese(), move))
+        return mating_moves
+
     def make_move(self, from_x: int, from_y: int, to_x: int, to_y: int) -> Tuple[bool, str]:
         if self.is_game_over:
             return False, "游戏已结束"
@@ -285,7 +299,7 @@ class GameController:
         if as_puzzle:
             solution = []
             for i, move in enumerate(pgn_result.moves):
-                if i % 2 == 0:
+                if move.color == pgn_result.first_move_color:
                     solution.append(move.to_chinese())
         else:
             solution = [m.to_chinese() for m in pgn_result.moves]
@@ -302,7 +316,7 @@ class GameController:
             steps=len(solution) if solution else 1,
             initial_board=grid,
             solution=solution if as_puzzle else [],
-            black_to_move=False
+            black_to_move=(pgn_result.first_move_color == PieceColor.BLACK)
         )
 
         self.load_puzzle(puzzle)
@@ -311,19 +325,22 @@ class GameController:
             self.board_history = []
             self.move_history = []
             temp_board = pgn_result.initial_board.clone()
+            current_color = pgn_result.first_move_color
             for move in pgn_result.moves:
                 self.board_history.append(temp_board.clone())
                 record = MoveRecord(move=move, is_correct=True, deviation_type="", time_taken=0.5)
                 self.move_history.append(record)
                 temp_board.move_piece(move.from_x, move.from_y, move.to_x, move.to_y)
+                current_color = (PieceColor.BLACK if current_color == PieceColor.RED
+                                  else PieceColor.RED)
 
             if self.board_history:
                 self.board = self.board_history[-1].clone()
                 last_move = self.move_history[-1].move
-                self.board.move_piece(last_move.from_x, last_move.from_y, last_move.to_x, last_move.to_y)
-                self.current_turn = (PieceColor.BLACK if len(pgn_result.moves) % 2 == 0
-                                     else PieceColor.RED)
-                self.is_game_over = False
+                self.board.move_piece(last_move.from_x, last_move.from_y,
+                                     last_move.to_x, last_move.to_y)
+            self.current_turn = current_color
+            self.is_game_over = False
 
         return puzzle
 

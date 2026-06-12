@@ -603,6 +603,26 @@ class MainWindow(QMainWindow):
     def _on_review_step_changed(self, step_index: int):
         self._show_board_at_step(step_index)
 
+        is_player_turn = (step_index % 2 == 0)
+        if is_player_turn and 0 <= step_index < len(self._saved_board_history):
+            board_before = self._saved_board_history[step_index]
+            player_color = (PieceColor.BLACK if self.game.current_puzzle.black_to_move
+                           else PieceColor.RED)
+
+            from ..core.rules import generate_moves, is_checkmate
+            from ..core.pieces import PieceColor as PC
+            mating_moves = []
+            all_moves = generate_moves(board_before, player_color)
+            for move in all_moves:
+                temp_board = board_before.clone()
+                temp_board.move_piece(move.from_x, move.from_y, move.to_x, move.to_y)
+                opponent = PC.BLACK if player_color == PC.RED else PC.RED
+                if is_checkmate(temp_board, opponent):
+                    mating_moves.append(move.to_chinese())
+            self.review_panel.set_variations(mating_moves)
+        else:
+            self.review_panel.set_variations([])
+
     def _on_review_closed(self):
         self.game.board = self._saved_board
         self.game.board_history = self._saved_board_history

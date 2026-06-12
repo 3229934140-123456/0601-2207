@@ -363,7 +363,6 @@ class BoardWidget(QWidget):
                 self._selected_x = x
                 self._selected_y = y
                 self.piece_selected.emit(x, y)
-                self._highlight_moves = []
 
             self.update()
         else:

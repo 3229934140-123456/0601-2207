@@ -17,6 +17,7 @@ class Puzzle:
     initial_board: List[List[str]]
     solution: List[str]
     black_to_move: bool = False
+    variations: List[List[str]] = field(default_factory=list)
 
 
 def puzzle_001() -> Puzzle:
